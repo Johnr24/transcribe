@@ -1,0 +1,29 @@
+version: '3'
+
+services:
+  # Whisper API service
+  whisper-api:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    container_name: whisper-api
+    restart: always
+    environment:
+      - ASR_MODEL=base
+      - ASR_ENGINE=openai_whisper
+    ports:
+      - "3017:9000"
+
+  # Telegram bot service
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-bot
+    restart: always
+    depends_on:
+      - whisper-api
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WHISPER_API_URL=http://whisper-api:9000/asr
+      - AUTHORIZED_USERS=${AUTHORIZED_USERS}
+    volumes:
+      - ./temp:/app/temp 

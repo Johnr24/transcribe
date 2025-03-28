@@ -1,0 +1,15 @@
+{
+  "name": "telegram-whisper-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that transcribes voice notes using Whisper API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "form-data": "^4.0.0",
+    "telegraf": "^4.15.3"
+  }
+}

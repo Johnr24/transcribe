@@ -1,0 +1,6 @@
+docker run -d -p 3017:9000 \
+  -e ASR_MODEL=base \
+  -e ASR_ENGINE=openai_whisper \
+  --restart=always \
+  --name openai-whisper-asr-webservice \
+  onerahmet/openai-whisper-asr-webservice:latest
