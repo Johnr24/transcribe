@@ -7,23 +7,39 @@ services:
     container_name: whisper-api
     restart: always
     environment:
-      - ASR_MODEL=base
+      - ASR_MODEL=medium
       - ASR_ENGINE=openai_whisper
     ports:
       - "3017:9000"
+    networks:
+      - network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000"] # Check if the API endpoint is reachable
+      interval: 10s # Check every 10 seconds
+      timeout: 5s # Wait 5 seconds for the check to complete
+      retries: 5 # Try 5 times before marking as unhealthy
+      start_period: 20s # Allow 30 seconds for initial startup/download before starting checks
 
   # Telegram bot service
-  telegram-bot:
+  whisper-telegram-bot:
     build:
       context: .
       dockerfile: Dockerfile
+    # image: ghcr.io/johnr24/telegram-bot:latest
     container_name: telegram-bot
     restart: always
     depends_on:
-      - whisper-api
+      whisper-api: # Service name as the key
+        condition: service_healthy # Wait for whisper-api's healthcheck to pass
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - WHISPER_API_URL=http://whisper-api:9000/asr
       - AUTHORIZED_USERS=${AUTHORIZED_USERS}
     volumes:
       - ./temp:/app/temp 
+    networks:
+      - network
+
+networks:
+  network:
+    driver: bridge

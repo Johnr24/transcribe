@@ -4,7 +4,8 @@ WORKDIR /app
 
 # Copy package files and install dependencies
 COPY package*.json ./
-RUN npm install
+# Install ffmpeg for audio extraction and then install node modules
+RUN apk update && apk add --no-cache ffmpeg && npm install
 
 # Copy application files
 COPY . .
