@@ -157,44 +157,45 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
 async function transcribeAudio(ctx, audioPath, fileType, statusMessage) {
   const messageId = ctx.message?.message_id || `unknown_${fileType}`;
 
-  await ctx.telegram.editMessageText(
-    ctx.chat.id,
-    statusMessage.message_id,
-    undefined,
-    `Transcribing ${fileType.includes('audio') ? 'audio' : 'extracted audio'} with Whisper API...`
-  );
-  console.log(`[${messageId}] [${fileType}] Updated status to Transcribing`);
-
-  const formData = new FormData();
-  formData.append('audio_file', fs.createReadStream(audioPath));
-  console.log(`[${messageId}] [${fileType}] Prepared form data with audio file ${audioPath}`);
-
-  console.log(`[${messageId}] [${fileType}] Sending request to Whisper API: ${whisperApiUrl}`);
-  const whisperResponse = await axios.post(whisperApiUrl, formData, {
-    headers: {
-      ...formData.getHeaders(),
-    },
+  // Lazy load Whisper model only when needed
+  const { Whisper } = await import('whisper-node');
+  const model = await Whisper.init({
+    modelName: 'medium',
+    device: 'cpu',
+    verbose: false
   });
-  console.log(`[${messageId}] [${fileType}] Received response from Whisper API`);
+  console.log(`[${messageId}] [${fileType}] Whisper model initialized`);
 
-  // Parse transcription
-  let transcription = 'No transcription returned';
-  if (whisperResponse && whisperResponse.data) {
-    console.log(`[${messageId}] [${fileType}] Whisper API response:`, JSON.stringify(whisperResponse.data));
-    if (typeof whisperResponse.data === 'string') {
-      transcription = whisperResponse.data;
-    } else if (whisperResponse.data.text) {
-      transcription = whisperResponse.data.text;
-    } else if (whisperResponse.data.result) {
-      transcription = whisperResponse.data.result;
-    } else {
-       console.log(`[${messageId}] [${fileType}] Unexpected Whisper API response format.`);
-       transcription = 'Could not parse transcription from API response.';
+  try {
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      statusMessage.message_id,
+      undefined,
+      `Transcribing ${fileType.includes('audio') ? 'audio' : 'extracted audio'}...`
+    );
+    console.log(`[${messageId}] [${fileType}] Updated status to Transcribing`);
+
+    console.log(`[${messageId}] [${fileType}] Starting transcription for ${audioPath}`);
+    const transcriptionResult = await model.transcribe(audioPath);
+    console.log(`[${messageId}] [${fileType}] Transcription finished`);
+    return transcriptionResult.text;
+  } finally {
+    // Force cleanup after transcription
+    if (model) {
+        try {
+            await model.cleanup();
+            console.log(`[${messageId}] [${fileType}] Whisper model memory released`);
+        } catch (cleanupError) {
+            console.error(`[${messageId}] [${fileType}] Error during Whisper model cleanup: ${cleanupError.message}`);
+        }
     }
-  } else {
-     console.log(`[${messageId}] [${fileType}] No data received from Whisper API.`);
+
+    // Explicitly force garbage collection (Node.js >= 14)
+    if (global.gc) {
+      global.gc();
+      console.log(`[${messageId}] [${fileType}] Forced garbage collection`);
+    }
   }
-  return transcription;
 }
 
 // Main processing function for media files
