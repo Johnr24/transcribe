@@ -8,10 +8,15 @@ RUN apk update && apk add --no-cache \
     python3 \
     py3-pip \
     build-base \
-    libc6-compat
+    libc6-compat \
+    python3-dev
+
+# Create and use Python virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Install Python requirements for whisper-node
-RUN pip3 install --no-cache-dir torch torchaudio
+RUN pip install --no-cache-dir torch torchaudio
 
 WORKDIR /app
 COPY package*.json ./
