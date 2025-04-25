@@ -202,8 +202,13 @@ async function transcribeAudio(ctx, audioPath, fileType, statusMessage) {
     console.log(`[${messageId}] [${fileType}] Running whisper command: ${whisperCommand}`);
 
     // Execute the command
-    // Increase maxBuffer size if needed for potentially long stderr output from whisper
-    const { stdout, stderr } = await execPromise(whisperCommand, { maxBuffer: 1024 * 1024 * 5 }); // 5MB buffer
+    // Increase maxBuffer size for potentially long stderr output from whisper
+    // Increase timeout significantly (e.g., 10 minutes) as transcription can be slow
+    const execOptions = {
+        maxBuffer: 1024 * 1024 * 5, // 5MB buffer
+        timeout: 600000 // 10 minutes in milliseconds
+    };
+    const { stdout, stderr } = await execPromise(whisperCommand, execOptions);
 
     // Whisper often outputs progress and details to stderr
     if (stderr) {
