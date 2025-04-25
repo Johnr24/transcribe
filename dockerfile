@@ -1,28 +1,23 @@
-FROM node:18-alpine
+# Change base image to Debian-based
+FROM node:18-slim
 
 WORKDIR /app
 
-# Install required system dependencies
-RUN apk update && apk add --no-cache \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    libgomp \
     python3 \
-    py3-pip \
-    build-base \
-    libc6-compat \
-    python3-dev
+    python3-pip \
+    python3-venv \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create and use Python virtual environment
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Install Python requirements for whisper-node with explicit indexes for Alpine compatibility
+# Install Python requirements
+# Note: whisper-node will install torch and torchaudio as dependencies
 RUN pip install --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/cpu \
-    torch==2.3.0 \
-    torchaudio==2.3.0
+    whisper-node==1.2.0
 
-WORKDIR /app
+# Rest of the Dockerfile remains the same...
 COPY package*.json ./
 RUN npm install --production
 
