@@ -19,7 +19,7 @@
     "ts-node": "^10.9.2",
     "@types/node": "^20.11.0",
     "@types/telegraf": "^4.0.2",
-    "@types/axios": "^1.6.3",
+    "@types/axios": "*",
     "@types/form-data": "^4.0.1",
     "typescript": "^5.3.3"
   }
