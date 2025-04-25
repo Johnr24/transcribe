@@ -66,454 +66,279 @@ bot.help((ctx) => {
 bot.on('text', (ctx) => {
   ctx.reply('Send me a voice note, and I will transcribe it for you!');
 });
+// ================== Helper Functions ==================
+
+// Function to download a file from Telegram
+async function downloadTelegramFile(ctx, fileId, fileType, statusMessage) {
+  const messageId = ctx.message?.message_id || `unknown_${fileType}`;
+  console.log(`[${messageId}] [${fileType}] Getting file link for file_id: ${fileId}`);
+  const fileLink = await ctx.telegram.getFileLink(fileId);
+  console.log(`[${messageId}] [${fileType}] Got file link: ${fileLink.href}`);
+
+  await ctx.telegram.editMessageText(
+    ctx.chat.id,
+    statusMessage.message_id,
+    undefined,
+    `Downloading ${fileType.replace('_', ' ')}...`
+  );
+  console.log(`[${messageId}] [${fileType}] Updated status to Downloading`);
+
+  const response = await axios({
+    method: 'GET',
+    url: fileLink.href,
+    responseType: 'stream'
+  });
+
+  // Determine file extension
+  let fileExtension = '.dat'; // Default extension
+  if (ctx.message.voice) fileExtension = '.oga';
+  else if (ctx.message.video) fileExtension = `.${ctx.message.video.mime_type?.split('/')[1] || 'mp4'}`;
+  else if (ctx.message.video_note) fileExtension = '.mp4';
+  else if (ctx.message.document) fileExtension = `.${ctx.message.document.mime_type?.split('/')[1] || 'dat'}`;
+
+
+  const tempFilePath = path.join(tempDir, `${Date.now()}_${messageId}${fileExtension}`);
+  const writer = fs.createWriteStream(tempFilePath);
+  console.log(`[${messageId}] [${fileType}] Starting download to ${tempFilePath}`);
+
+  response.data.pipe(writer);
+
+  await new Promise((resolve, reject) => {
+    writer.on('finish', () => {
+      console.log(`[${messageId}] [${fileType}] Finished downloading file`);
+      resolve();
+    });
+    writer.on('error', (err) => {
+      console.error(`[${messageId}] [${fileType}] Error writing file: ${err.message}`);
+      reject(err);
+    });
+  });
+
+  return tempFilePath;
+}
+
+// Function to extract audio using ffmpeg
+async function extractAudio(ctx, inputPath, fileType, statusMessage) {
+  const messageId = ctx.message?.message_id || `unknown_${fileType}`;
+  let tempAudioPath = null;
+
+  await ctx.telegram.editMessageText(
+    ctx.chat.id,
+    statusMessage.message_id,
+    undefined,
+    'Extracting audio...'
+  );
+  console.log(`[${messageId}] [${fileType}] Updated status to Extracting Audio`);
+
+  tempAudioPath = path.join(tempDir, `${Date.now()}_${messageId}.mp3`); // Output as mp3
+  const ffmpegCommand = `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -q:a 2 "${tempAudioPath}"`;
+  console.log(`[${messageId}] [${fileType}] Running ffmpeg command: ${ffmpegCommand}`);
+
+  try {
+    const { stdout, stderr } = await execPromise(ffmpegCommand);
+    if (stderr) {
+      console.log(`[${messageId}] [${fileType}] ffmpeg stderr: ${stderr}`);
+    }
+    console.log(`[${messageId}] [${fileType}] ffmpeg stdout: ${stdout}`);
+    console.log(`[${messageId}] [${fileType}] Successfully extracted audio to ${tempAudioPath}`);
+    return tempAudioPath;
+  } catch (ffmpegError) {
+    console.error(`[${messageId}] [${fileType}] ffmpeg execution failed: ${ffmpegError.message}`);
+    console.error(`[${messageId}] [${fileType}] ffmpeg stderr: ${ffmpegError.stderr}`);
+    // Clean up failed audio path if it exists
+     if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+        try { fs.unlinkSync(tempAudioPath); } catch (e) { console.error(`[${messageId}] Error deleting failed temp audio file: ${e.message}`); }
+    }
+    throw new Error(`Failed to extract audio: ${ffmpegError.message}`);
+  }
+}
+
+// Function to transcribe an audio file using Whisper API
+async function transcribeAudio(ctx, audioPath, fileType, statusMessage) {
+  const messageId = ctx.message?.message_id || `unknown_${fileType}`;
+
+  await ctx.telegram.editMessageText(
+    ctx.chat.id,
+    statusMessage.message_id,
+    undefined,
+    `Transcribing ${fileType.includes('audio') ? 'audio' : 'extracted audio'} with Whisper API...`
+  );
+  console.log(`[${messageId}] [${fileType}] Updated status to Transcribing`);
+
+  const formData = new FormData();
+  formData.append('audio_file', fs.createReadStream(audioPath));
+  console.log(`[${messageId}] [${fileType}] Prepared form data with audio file ${audioPath}`);
+
+  console.log(`[${messageId}] [${fileType}] Sending request to Whisper API: ${whisperApiUrl}`);
+  const whisperResponse = await axios.post(whisperApiUrl, formData, {
+    headers: {
+      ...formData.getHeaders(),
+    },
+  });
+  console.log(`[${messageId}] [${fileType}] Received response from Whisper API`);
+
+  // Parse transcription
+  let transcription = 'No transcription returned';
+  if (whisperResponse && whisperResponse.data) {
+    console.log(`[${messageId}] [${fileType}] Whisper API response:`, JSON.stringify(whisperResponse.data));
+    if (typeof whisperResponse.data === 'string') {
+      transcription = whisperResponse.data;
+    } else if (whisperResponse.data.text) {
+      transcription = whisperResponse.data.text;
+    } else if (whisperResponse.data.result) {
+      transcription = whisperResponse.data.result;
+    } else {
+       console.log(`[${messageId}] [${fileType}] Unexpected Whisper API response format.`);
+       transcription = 'Could not parse transcription from API response.';
+    }
+  } else {
+     console.log(`[${messageId}] [${fileType}] No data received from Whisper API.`);
+  }
+  return transcription;
+}
+
+// Main processing function for media files
+async function processMediaFile(ctx, fileId, fileType, needsAudioExtraction) {
+  let statusMessage;
+  let tempFilePath = null; // Path for downloaded file
+  let tempAudioPath = null; // Path for extracted audio (if needed)
+  const messageId = ctx.message?.message_id || `unknown_${fileType}`;
+  console.log(`[${messageId}] [${fileType}] Received ${fileType.replace('_', ' ')} from user ${ctx.from.id}`);
+
+  try {
+    statusMessage = await ctx.reply(`Receiving your ${fileType.replace('_', ' ')}...`);
+    console.log(`[${messageId}] [${fileType}] Sent initial status message ${statusMessage.message_id}`);
+
+    // 1. Download file
+    tempFilePath = await downloadTelegramFile(ctx, fileId, fileType, statusMessage);
+
+    // 2. Extract Audio (if needed)
+    let audioPathForTranscription = tempFilePath;
+    if (needsAudioExtraction) {
+      tempAudioPath = await extractAudio(ctx, tempFilePath, fileType, statusMessage);
+      audioPathForTranscription = tempAudioPath; // Use extracted audio for transcription
+    }
+
+    // 3. Transcribe Audio
+    const transcription = await transcribeAudio(ctx, audioPathForTranscription, fileType, statusMessage);
+
+    // 4. Send Result
+    console.log(`[${messageId}] [${fileType}] Sending transcription to user`);
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      statusMessage.message_id,
+      undefined,
+      `Transcription complete! Here's the content:\n\n${transcription}`
+    );
+    console.log(`[${messageId}] [${fileType}] Successfully sent transcription.`);
+
+  } catch (error) {
+    console.error(`[${messageId}] [${fileType}] Error processing ${fileType}:`, error.message);
+    if (error.response) {
+      console.error(`[${messageId}] [${fileType}] API Response data:`, error.response.data);
+      console.error(`[${messageId}] [${fileType}] API Status code:`, error.response.status);
+    } else if (error.stderr) { // Check for ffmpeg specific stderr
+       console.error(`[${messageId}] [${fileType}] Process stderr:`, error.stderr);
+    } else {
+      console.error(`[${messageId}] [${fileType}] Full error object:`, error);
+    }
+
+    // Notify user about the error
+    try {
+      if (statusMessage) {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          statusMessage.message_id,
+          undefined,
+          `Sorry, there was an error processing your ${fileType.replace('_', ' ')}. Please try again later.`
+        );
+         console.log(`[${messageId}] [${fileType}] Edited status message to show error.`);
+      } else {
+        await ctx.reply(`Sorry, there was an error processing your ${fileType.replace('_', ' ')}. Please try again later.`);
+        console.log(`[${messageId}] [${fileType}] Sent new reply to show error.`);
+      }
+    } catch (replyError) {
+      console.error(`[${messageId}] [${fileType}] Failed to notify user about the error: ${replyError.message}`);
+    }
+  } finally {
+    // 5. Cleanup ALL temporary files
+    if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+        console.log(`[${messageId}] [${fileType}] Cleaning up temp audio file: ${tempAudioPath}`);
+        try { fs.unlinkSync(tempAudioPath); } catch (e) { console.error(`[${messageId}] Error deleting temp audio file: ${e.message}`); }
+    }
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+        console.log(`[${messageId}] [${fileType}] Cleaning up temp media file: ${tempFilePath}`);
+        try { fs.unlinkSync(tempFilePath); } catch (e) { console.error(`[${messageId}] Error deleting temp media file: ${e.message}`); }
+    }
+  }
+}
+
+// ================== Bot Handlers ==================
 
 // Handle voice messages
 bot.on('voice', async (ctx) => {
-  try {
-    // Send initial processing message
-    const statusMessage = await ctx.reply('Receiving your voice note...');
-    
-    // Get file information
-    const fileId = ctx.message.voice.file_id;
-    const fileLink = await ctx.telegram.getFileLink(fileId);
-    
-    // Update status
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Downloading voice note...'
-    );
-    
-    // Download the file
-    const response = await axios({
-      method: 'GET',
-      url: fileLink.href,
-      responseType: 'stream'
-    });
-    
-    const tempFilePath = path.join(tempDir, `${Date.now()}.oga`);
-    const writer = fs.createWriteStream(tempFilePath);
-    
-    response.data.pipe(writer);
-    
-    await new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
-    
-    // Update status
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Transcribing with Shed.Gay Whisper API...'
-    );
-    
-    // Prepare form data with the audio file
-    const formData = new FormData();
-    formData.append('audio_file', fs.createReadStream(tempFilePath));
-    
-    // Send request to Whisper API
-    const whisperResponse = await axios.post(whisperApiUrl, formData, {
-      headers: {
-        ...formData.getHeaders(),
-      },
-    });
-    
-    // Clean up the temporary file
-    fs.unlinkSync(tempFilePath);
-    
-    // Get the transcription text - handle the response format properly
-    let transcription = 'No transcription returned';
-    
-    if (whisperResponse && whisperResponse.data) {
-      // Debug the response structure
-      console.log('Whisper API response:', JSON.stringify(whisperResponse.data));
-      
-      if (typeof whisperResponse.data === 'string') {
-        transcription = whisperResponse.data;
-      } else if (whisperResponse.data.text) {
-        transcription = whisperResponse.data.text;
-      } else if (whisperResponse.data.result) {
-        transcription = whisperResponse.data.result;
-      }
-    }
-    
-    // Send the transcription to the user
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      `Transcription complete! Here's what you said:\n\n${transcription}`
-    );
-    
-  } catch (error) {
-    console.error('Error:', error.message);
-    if (error.response) {
-      console.error('Response data:', error.response.data);
-      console.error('Status code:', error.response.status);
-    }
-    await ctx.reply('Sorry, there was an error processing your voice note. Please try again later.');
-  }
+  const fileId = ctx.message.voice.file_id;
+  await processMediaFile(ctx, fileId, 'voice', false); // No audio extraction needed for voice
 });
 
 // Handle video messages
 bot.on('video', async (ctx) => {
-  let statusMessage;
-  let tempVideoPath; // Path for downloaded video
-  let tempAudioPath; // Path for extracted audio
-  const messageId = ctx.message?.message_id || 'unknown_video';
-  console.log(`[${messageId}] Received video from user ${ctx.from.id}`);
-
-  try {
-    // Send initial processing message
-    statusMessage = await ctx.reply('Receiving your video...');
-    console.log(`[${messageId}] Sent initial status message ${statusMessage.message_id}`);
-
-    // Get file information
-    const fileId = ctx.message.video.file_id;
-    console.log(`[${messageId}] Getting file link for file_id: ${fileId}`);
-    const fileLink = await ctx.telegram.getFileLink(fileId);
-    console.log(`[${messageId}] Got file link: ${fileLink.href}`);
-
-    // Update status
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Downloading video...'
-    );
-    console.log(`[${messageId}] Updated status to Downloading`);
-
-    // Download the video file
-    const response = await axios({
-      method: 'GET',
-      url: fileLink.href,
-      responseType: 'stream'
-    });
-
-    const fileExtension = ctx.message.video.mime_type ? `.${ctx.message.video.mime_type.split('/')[1]}` : '.mp4';
-    tempVideoPath = path.join(tempDir, `${Date.now()}_${messageId}${fileExtension}`);
-    const writer = fs.createWriteStream(tempVideoPath);
-    console.log(`[${messageId}] Starting download to ${tempVideoPath}`);
-
-    response.data.pipe(writer);
-
-    await new Promise((resolve, reject) => {
-      writer.on('finish', () => {
-        console.log(`[${messageId}] Finished downloading video file`);
-        resolve();
-      });
-      writer.on('error', (err) => {
-        console.error(`[${messageId}] Error writing video file: ${err.message}`);
-        reject(err);
-      });
-    });
-
-    // Update status for audio extraction
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Extracting audio...'
-    );
-    console.log(`[${messageId}] Updated status to Extracting Audio`);
-
-    // Extract audio using ffmpeg
-    tempAudioPath = path.join(tempDir, `${Date.now()}_${messageId}.mp3`); // Output as mp3
-    const ffmpegCommand = `ffmpeg -i "${tempVideoPath}" -vn -acodec libmp3lame -q:a 2 "${tempAudioPath}"`;
-    console.log(`[${messageId}] Running ffmpeg command: ${ffmpegCommand}`);
-
-    try {
-      const { stdout, stderr } = await execPromise(ffmpegCommand);
-      if (stderr) {
-        console.log(`[${messageId}] ffmpeg stderr: ${stderr}`); // Log stderr even if command succeeds
-      }
-      console.log(`[${messageId}] ffmpeg stdout: ${stdout}`);
-      console.log(`[${messageId}] Successfully extracted audio to ${tempAudioPath}`);
-    } catch (ffmpegError) {
-      console.error(`[${messageId}] ffmpeg execution failed: ${ffmpegError.message}`);
-      console.error(`[${messageId}] ffmpeg stderr: ${ffmpegError.stderr}`); // Log stderr on error
-      throw new Error(`Failed to extract audio: ${ffmpegError.message}`); // Rethrow to trigger main catch block
-    }
-
-    // Update status for transcription
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Transcribing extracted audio with Whisper API...'
-    );
-    console.log(`[${messageId}] Updated status to Transcribing`);
-
-    // Prepare form data with the extracted audio file
-    const formData = new FormData();
-    formData.append('audio_file', fs.createReadStream(tempAudioPath));
-    console.log(`[${messageId}] Prepared form data with audio file ${tempAudioPath}`);
-
-    // Send request to Whisper API
-    console.log(`[${messageId}] Sending request to Whisper API: ${whisperApiUrl}`);
-    const whisperResponse = await axios.post(whisperApiUrl, formData, {
-      headers: {
-        ...formData.getHeaders(),
-      },
-    });
-    console.log(`[${messageId}] Received response from Whisper API`);
-
-    // Clean up temporary files (audio first, then video)
-    console.log(`[${messageId}] Deleting temporary audio file: ${tempAudioPath}`);
-    fs.unlinkSync(tempAudioPath);
-    tempAudioPath = null;
-    console.log(`[${messageId}] Deleting temporary video file: ${tempVideoPath}`);
-    fs.unlinkSync(tempVideoPath);
-    tempVideoPath = null;
-
-    // Get the transcription text
-    let transcription = 'No transcription returned';
-    if (whisperResponse && whisperResponse.data) {
-      console.log(`[${messageId}] Whisper API response (video):`, JSON.stringify(whisperResponse.data));
-      if (typeof whisperResponse.data === 'string') {
-        transcription = whisperResponse.data;
-      } else if (whisperResponse.data.text) {
-        transcription = whisperResponse.data.text;
-      } else if (whisperResponse.data.result) {
-        transcription = whisperResponse.data.result;
-      } else {
-         console.log(`[${messageId}] Unexpected Whisper API response format.`);
-         transcription = 'Could not parse transcription from API response.';
-      }
-    } else {
-       console.log(`[${messageId}] No data received from Whisper API.`);
-    }
-
-    // Send the transcription to the user
-    console.log(`[${messageId}] Sending transcription to user`);
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      `Transcription complete! Here's the audio from your video:\n\n${transcription}`
-    );
-    console.log(`[${messageId}] Successfully sent transcription.`);
-
-  } catch (error) {
-    console.error(`[${messageId}] Error processing video:`, error.message);
-    if (error.response) {
-      console.error(`[${messageId}] API Response data:`, error.response.data);
-      console.error(`[${messageId}] API Status code:`, error.response.status);
-    } else if (error.stderr) { // Check for ffmpeg specific stderr
-       console.error(`[${messageId}] Process stderr:`, error.stderr);
-    } else {
-      console.error(`[${messageId}] Full error object:`, error);
-    }
-
-    // Clean up temp files if they exist and an error occurred
-    if (tempAudioPath && fs.existsSync(tempAudioPath)) {
-        console.log(`[${messageId}] Cleaning up temp audio file due to error: ${tempAudioPath}`);
-        try { fs.unlinkSync(tempAudioPath); } catch (e) { console.error(`[${messageId}] Error deleting temp audio file: ${e.message}`); }
-    }
-    if (tempVideoPath && fs.existsSync(tempVideoPath)) {
-        console.log(`[${messageId}] Cleaning up temp video file due to error: ${tempVideoPath}`);
-        try { fs.unlinkSync(tempVideoPath); } catch (e) { console.error(`[${messageId}] Error deleting temp video file: ${e.message}`); }
-    }
-
-    // Try to inform the user about the error
-    try {
-      if (statusMessage) {
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMessage.message_id,
-          undefined,
-          'Sorry, there was an error processing your video. Please try again later.'
-        );
-         console.log(`[${messageId}] Edited status message to show error.`);
-      } else {
-        await ctx.reply('Sorry, there was an error processing your video. Please try again later.');
-        console.log(`[${messageId}] Sent new reply to show error.`);
-      }
-    } catch (replyError) {
-      console.error(`[${messageId}] Failed to notify user about the error: ${replyError.message}`);
-    }
-  }
+  const fileId = ctx.message.video.file_id;
+  await processMediaFile(ctx, fileId, 'video', true); // Needs audio extraction
 });
 
-// Handle video note messages (circular videos) - MOVED TO TOP LEVEL
+// Handle video note messages (circular videos)
 bot.on('video_note', async (ctx) => {
-  let statusMessage;
-  let tempVideoPath; // Path for downloaded video note
-  let tempAudioPath; // Path for extracted audio
-  const messageId = ctx.message?.message_id || 'unknown_video_note';
-  console.log(`[${messageId}] Received video note from user ${ctx.from.id}`);
+  const fileId = ctx.message.video_note.file_id;
+  await processMediaFile(ctx, fileId, 'video_note', true); // Needs audio extraction
+});
 
-  try {
-    // Send initial processing message
-    statusMessage = await ctx.reply('Receiving your video note...');
-    console.log(`[${messageId}] Sent initial status message ${statusMessage.message_id}`);
+// Handle audio messages (sent as audio file, possibly forwarded)
+bot.on('audio', async (ctx) => {
+  console.log('>>> Audio handler entered <<<');
+  const audio = ctx.message.audio;
+  const fileId = audio.file_id;
+  // Use 'audio' as fileType for logging/status messages
+  await processMediaFile(ctx, fileId, 'audio', false); // No extraction needed
+});
 
-    // Get file information
-    const fileId = ctx.message.video_note.file_id;
-    console.log(`[${messageId}] Getting file link for file_id: ${fileId}`);
-    const fileLink = await ctx.telegram.getFileLink(fileId);
-    console.log(`[${messageId}] Got file link: ${fileLink.href}`);
+// Handle document messages (generic attachments)
+bot.on('document', async (ctx) => {
+  console.log('>>> Document handler entered <<<');
+  const doc = ctx.message.document;
+  const fileId = doc.file_id;
+  const mimeType = doc.mime_type || 'application/octet-stream';
+  const messageId = ctx.message?.message_id || 'unknown_document';
 
-    // Update status
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Downloading video note...'
-    );
-    console.log(`[${messageId}] Updated status to Downloading`);
+  console.log(`[${messageId}] [document] Received document: ${doc.file_name}, MIME type: '${mimeType}', Size: ${doc.file_size}`);
 
-    // Download the video note file (typically mp4)
-    const response = await axios({
-      method: 'GET',
-      url: fileLink.href,
-      responseType: 'stream'
-    });
+  // Define supported MIME types for transcription (expanded list)
+  const supportedAudioTypes = [
+    'audio/ogg',
+    'audio/mpeg', // Common for MP3
+    'audio/mp3',
+    'audio/wav',
+    'audio/x-wav', // Variations for WAV
+    'audio/wave',
+    'audio/x-pn-wav',
+    'audio/aac',
+    'audio/flac',
+    'audio/opus',
+    'audio/m4a'
+  ];
+  const supportedVideoTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/x-matroska']; // AVI, MKV
 
-    tempVideoPath = path.join(tempDir, `${Date.now()}_${messageId}.mp4`);
-    const writer = fs.createWriteStream(tempVideoPath);
-    console.log(`[${messageId}] Starting download to ${tempVideoPath}`);
-
-    response.data.pipe(writer);
-
-    await new Promise((resolve, reject) => {
-      writer.on('finish', () => {
-        console.log(`[${messageId}] Finished downloading video note file`);
-        resolve();
-      });
-      writer.on('error', (err) => {
-        console.error(`[${messageId}] Error writing video note file: ${err.message}`);
-        reject(err);
-      });
-    });
-
-    // Update status for audio extraction
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Extracting audio...'
-    );
-    console.log(`[${messageId}] Updated status to Extracting Audio`);
-
-    // Extract audio using ffmpeg
-    tempAudioPath = path.join(tempDir, `${Date.now()}_${messageId}.mp3`); // Output as mp3
-    const ffmpegCommand = `ffmpeg -i "${tempVideoPath}" -vn -acodec libmp3lame -q:a 2 "${tempAudioPath}"`;
-    console.log(`[${messageId}] Running ffmpeg command: ${ffmpegCommand}`);
-
-    try {
-      const { stdout, stderr } = await execPromise(ffmpegCommand);
-      if (stderr) {
-        console.log(`[${messageId}] ffmpeg stderr: ${stderr}`); // Log stderr even if command succeeds
-      }
-      console.log(`[${messageId}] ffmpeg stdout: ${stdout}`);
-      console.log(`[${messageId}] Successfully extracted audio to ${tempAudioPath}`);
-    } catch (ffmpegError) {
-      console.error(`[${messageId}] ffmpeg execution failed: ${ffmpegError.message}`);
-      console.error(`[${messageId}] ffmpeg stderr: ${ffmpegError.stderr}`); // Log stderr on error
-      throw new Error(`Failed to extract audio: ${ffmpegError.message}`); // Rethrow to trigger main catch block
-    }
-
-    // Update status for transcription
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      'Transcribing extracted audio with Whisper API...'
-    );
-    console.log(`[${messageId}] Updated status to Transcribing`);
-
-    // Prepare form data with the extracted audio file
-    const formData = new FormData();
-    formData.append('audio_file', fs.createReadStream(tempAudioPath));
-    console.log(`[${messageId}] Prepared form data with audio file ${tempAudioPath}`);
-
-    // Send request to Whisper API
-    console.log(`[${messageId}] Sending request to Whisper API: ${whisperApiUrl}`);
-    const whisperResponse = await axios.post(whisperApiUrl, formData, {
-      headers: {
-        ...formData.getHeaders(),
-      },
-    });
-    console.log(`[${messageId}] Received response from Whisper API`);
-
-    // Clean up temporary files (audio first, then video)
-    console.log(`[${messageId}] Deleting temporary audio file: ${tempAudioPath}`);
-    fs.unlinkSync(tempAudioPath);
-    tempAudioPath = null;
-    console.log(`[${messageId}] Deleting temporary video file: ${tempVideoPath}`);
-    fs.unlinkSync(tempVideoPath);
-    tempVideoPath = null;
-
-    // Get the transcription text
-    let transcription = 'No transcription returned';
-    if (whisperResponse && whisperResponse.data) {
-      console.log(`[${messageId}] Whisper API response (video_note):`, JSON.stringify(whisperResponse.data));
-      if (typeof whisperResponse.data === 'string') {
-        transcription = whisperResponse.data;
-      } else if (whisperResponse.data.text) {
-        transcription = whisperResponse.data.text;
-      } else if (whisperResponse.data.result) {
-        transcription = whisperResponse.data.result;
-      } else {
-         console.log(`[${messageId}] Unexpected Whisper API response format.`);
-         transcription = 'Could not parse transcription from API response.';
-      }
-    } else {
-       console.log(`[${messageId}] No data received from Whisper API.`);
-    }
-
-    // Send the transcription to the user
-    console.log(`[${messageId}] Sending transcription to user`);
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      `Transcription complete! Here's the audio from your video note:\n\n${transcription}`
-    );
-    console.log(`[${messageId}] Successfully sent transcription.`);
-
-  } catch (error) {
-    console.error(`[${messageId}] Error processing video note:`, error.message);
-     if (error.response) {
-      console.error(`[${messageId}] API Response data:`, error.response.data);
-      console.error(`[${messageId}] API Status code:`, error.response.status);
-    } else if (error.stderr) { // Check for ffmpeg specific stderr
-       console.error(`[${messageId}] Process stderr:`, error.stderr);
-    } else {
-      console.error(`[${messageId}] Full error object:`, error);
-    }
-
-    // Clean up temp files if they exist and an error occurred
-    if (tempAudioPath && fs.existsSync(tempAudioPath)) {
-        console.log(`[${messageId}] Cleaning up temp audio file due to error: ${tempAudioPath}`);
-        try { fs.unlinkSync(tempAudioPath); } catch (e) { console.error(`[${messageId}] Error deleting temp audio file: ${e.message}`); }
-    }
-    if (tempVideoPath && fs.existsSync(tempVideoPath)) {
-        console.log(`[${messageId}] Cleaning up temp video file due to error: ${tempVideoPath}`);
-        try { fs.unlinkSync(tempVideoPath); } catch (e) { console.error(`[${messageId}] Error deleting temp video file: ${e.message}`); }
-    }
-
-    // Try to inform the user about the error
-    try {
-      if (statusMessage) {
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMessage.message_id,
-          undefined,
-          'Sorry, there was an error processing your video note. Please try again later.'
-        );
-         console.log(`[${messageId}] Edited status message to show error.`);
-      } else {
-        await ctx.reply('Sorry, there was an error processing your video note. Please try again later.');
-        console.log(`[${messageId}] Sent new reply to show error.`);
-      }
-    } catch (replyError) {
-      console.error(`[${messageId}] Failed to notify user about the error: ${replyError.message}`);
-    }
+  if (supportedAudioTypes.includes(mimeType)) {
+    console.log(`[${messageId}] [document] Processing as audio document.`);
+    // Use 'audio_document' as fileType for logging/status messages
+    await processMediaFile(ctx, fileId, 'audio_document', false);
+  } else if (supportedVideoTypes.includes(mimeType)) {
+    console.log(`[${messageId}] [document] Processing as video document.`);
+    // Use 'video_document' as fileType for logging/status messages
+    await processMediaFile(ctx, fileId, 'video_document', true);
+  } else {
+    console.log(`[${messageId}] [document] Unsupported file type: ${mimeType}`);
+    await ctx.reply(`Sorry, I can only transcribe audio and video files. The received file type (${mimeType}) is not supported.`);
   }
 });
 
