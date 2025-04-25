@@ -20,7 +20,7 @@
     "@types/node": "^20.11.0",
     "@types/telegraf": "^4.0.2",
     "@types/axios": "*",
-    "@types/form-data": "^4.0.1",
+    "@types/form-data": "*",
     "typescript": "^5.3.3"
   }
 }
