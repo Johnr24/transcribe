@@ -7,12 +7,10 @@ services:
     # image: ghcr.io/johnr24/telegram-bot:latest
     container_name: telegram-bot
     restart: always
-    depends_on:
-      whisper-api: # Service name as the key
-        condition: service_healthy # Wait for whisper-api's healthcheck to pass
+    # depends_on is removed as whisper-api service is removed
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - WHISPER_API_URL=http://whisper-api:9000/asr
+      # WHISPER_API_URL is removed as the bot uses local whisper CLI
       - AUTHORIZED_USERS=${AUTHORIZED_USERS}
     volumes:
       - ./temp:/app/temp 
