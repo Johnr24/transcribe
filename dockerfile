@@ -5,10 +5,15 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     python3 \
     python3-pip \
+    python3-venv \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install whisper
+# Create and activate virtual environment for whisper
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install whisper in the virtual environment
 RUN pip3 install git+https://github.com/openai/whisper.git
 
 # Create app directory
