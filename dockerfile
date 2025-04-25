@@ -12,7 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python requirements
+# Create and activate Python virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Python requirements in the virtual environment
 # Note: whisper-node will install torch and torchaudio as dependencies
 RUN pip install --no-cache-dir \
     whisper-node==1.2.0
