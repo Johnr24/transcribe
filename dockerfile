@@ -25,7 +25,8 @@ RUN pip install --no-cache-dir \
 
 # Rest of the Dockerfile remains the same...
 COPY package*.json ./
-RUN npm install --production
+# Install production dependencies only, using the recommended flag
+RUN npm install --omit=dev
 
 COPY . .
 
