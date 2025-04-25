@@ -34,6 +34,6 @@ COPY . .
 
 RUN mkdir -p temp
 
-# Set memory limits and garbage collection flags
-ENV NODE_OPTIONS="--max-old-space-size=3072 --expose-gc"
+# Set memory limits
+ENV NODE_OPTIONS="--max-old-space-size=3072"
 CMD ["npm", "start"]
