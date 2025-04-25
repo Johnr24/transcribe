@@ -177,10 +177,10 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
 // Function to transcribe an audio file using Whisper CLI
 async function transcribeAudio(ctx, audioPath, fileType, statusMessage) {
   const messageId = ctx.message?.message_id || `unknown_${fileType}`;
-  // Use a base name derived from the audio file for output files
+  // Determine the expected output path based on Whisper's default naming convention
+  // It uses the input filename base and places it in the output directory.
   const audioBaseName = path.basename(audioPath, path.extname(audioPath));
-  const outputBase = path.join(tempDir, `${audioBaseName}_transcription`);
-  const outputTxtPath = `${outputBase}.txt`; // Whisper appends .txt by default
+  const outputTxtPath = path.join(tempDir, `${audioBaseName}.txt`); // Whisper appends .txt by default
 
   try {
     await ctx.telegram.editMessageText(
@@ -260,10 +260,12 @@ async function transcribeAudio(ctx, audioPath, fileType, statusMessage) {
       throw error; // Re-throw the original or modified error
   } finally {
     // Clean up the generated transcription file(s)
-    // Whisper might create other files if format changes or based on exact version
+    // Whisper might create other files if format changes or based on exact version.
+    // We know the .txt path, let's clean that and potentially others with the same base name.
+    const outputBaseName = path.basename(outputTxtPath, '.txt'); // Get the base name without .txt
     const possibleExtensions = ['.txt', '.vtt', '.srt', '.tsv', '.json'];
     possibleExtensions.forEach(ext => {
-        const filePath = `${outputBase}${ext}`;
+        const filePath = path.join(tempDir, `${outputBaseName}${ext}`);
         if (fs.existsSync(filePath)) {
             console.log(`[${messageId}] [${fileType}] Cleaning up whisper output file: ${filePath}`);
             try { fs.unlinkSync(filePath); } catch (e) { console.error(`[${messageId}] Error deleting whisper output file ${filePath}: ${e.message}`); }
@@ -371,16 +373,29 @@ async function processMediaFile(ctx, fileId, fileType, needsAudioExtraction) {
   } finally {
     // 5. Cleanup ALL temporary files involved in this request
     const filesToDelete = [tempAudioPath, tempFilePath]; // Add paths that might exist
-    // Also add potential whisper output files (though transcribeAudio should handle its own)
-    const audioBaseName = tempAudioPath ? path.basename(tempAudioPath, path.extname(tempAudioPath)) : (tempFilePath ? path.basename(tempFilePath, path.extname(tempFilePath)) : null);
-    if (audioBaseName) {
-        const outputBase = path.join(tempDir, `${audioBaseName}_transcription`);
+
+    // Also add potential whisper output files based on the *original* input file name base,
+    // as transcribeAudio's finally block might not run if an error occurred before it.
+    const originalInputBaseName = tempFilePath ? path.basename(tempFilePath, path.extname(tempFilePath)) : null;
+    if (originalInputBaseName) {
         const possibleExtensions = ['.txt', '.vtt', '.srt', '.tsv', '.json'];
-         possibleExtensions.forEach(ext => filesToDelete.push(`${outputBase}${ext}`));
+        possibleExtensions.forEach(ext => {
+            filesToDelete.push(path.join(tempDir, `${originalInputBaseName}${ext}`));
+        });
+    }
+    // If audio was extracted, also add potential whisper outputs based on the extracted file name
+    const extractedAudioBaseName = tempAudioPath ? path.basename(tempAudioPath, path.extname(tempAudioPath)) : null;
+     if (extractedAudioBaseName && extractedAudioBaseName !== originalInputBaseName) {
+        const possibleExtensions = ['.txt', '.vtt', '.srt', '.tsv', '.json'];
+        possibleExtensions.forEach(ext => {
+            filesToDelete.push(path.join(tempDir, `${extractedAudioBaseName}${ext}`));
+        });
     }
 
+    // Use a Set to avoid trying to delete the same file multiple times
+    const uniqueFilesToDelete = [...new Set(filesToDelete)];
 
-    filesToDelete.forEach(filePath => {
+    uniqueFilesToDelete.forEach(filePath => {
         if (filePath && fs.existsSync(filePath)) {
             console.log(`[${messageId}] [${fileType}] Cleaning up temp file: ${filePath}`);
             try { fs.unlinkSync(filePath); } catch (e) { console.error(`[${messageId}] Error deleting temp file ${filePath}: ${e.message}`); }
