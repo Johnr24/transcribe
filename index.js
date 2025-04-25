@@ -36,8 +36,11 @@ if (authorizedUsers.length === 0) {
   console.warn('No AUTHORIZED_USERS specified in .env file. Bot will be accessible to everyone.');
 }
 
-// Create a new bot instance
-const bot = new Telegraf(token);
+// Create a new bot instance with increased handler timeout
+// Set to 11 minutes (660000 ms) to accommodate long transcriptions
+const bot = new Telegraf(token, {
+  handlerTimeout: 660000
+});
 
 // Authorization middleware
 bot.use((ctx, next) => {
