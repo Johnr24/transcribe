@@ -196,8 +196,8 @@ async function transcribeAudio(ctx, audioPath, fileType, statusMessage) {
     // Using 'en' language as suggested by the user (can be parameterized)
     // Outputting only TXT format to the tempDir
     // Using --fp16 False as suggested by the user (suitable for CPU)
-    // Specify the output filename base to avoid conflicts if multiple transcriptions run concurrently
-    const whisperCommand = `whisper "${audioPath}" --model medium --language en --output_dir "${tempDir}" --output_format txt --fp16 False --output_file "${outputBase}"`;
+    // Whisper will automatically name the output file based on the input file name within the output_dir
+    const whisperCommand = `whisper "${audioPath}" --model medium --language en --output_dir "${tempDir}" --output_format txt --fp16 False`;
 
     console.log(`[${messageId}] [${fileType}] Running whisper command: ${whisperCommand}`);
 
