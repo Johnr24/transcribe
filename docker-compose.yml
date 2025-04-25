@@ -1,25 +1,4 @@
-version: '3'
-
 services:
-  # Whisper API service
-  whisper-api:
-    image: onerahmet/openai-whisper-asr-webservice:latest
-    container_name: whisper-api
-    restart: always
-    environment:
-      - ASR_MODEL=medium
-      - ASR_ENGINE=openai_whisper
-    ports:
-      - "3017:9000"
-    networks:
-      - network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000"] # Check if the API endpoint is reachable
-      interval: 10s # Check every 10 seconds
-      timeout: 5s # Wait 5 seconds for the check to complete
-      retries: 5 # Try 5 times before marking as unhealthy
-      start_period: 20s # Allow 30 seconds for initial startup/download before starting checks
-
   # Telegram bot service
   whisper-telegram-bot:
     build:
