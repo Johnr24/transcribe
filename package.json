@@ -19,7 +19,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/telegraf": "^4.0.2",
-    "@types/axios": "^1.6.2",
+    "@types/axios": "^1.6.3",
     "@types/form-data": "^4.0.1",
     "typescript": "^5.3.3"
   }
