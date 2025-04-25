@@ -17,9 +17,11 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Install Python requirements in the virtual environment
-# Note: whisper-node will install torch and torchaudio as dependencies
+# Install openai-whisper and its dependencies (torch, torchaudio)
 RUN pip install --no-cache-dir \
-    whisper-node==1.2.0
+    openai-whisper \
+    torch \
+    torchaudio
 
 # Rest of the Dockerfile remains the same...
 COPY package*.json ./

@@ -4,7 +4,7 @@ const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process'); // Import exec for running ffmpeg
+const { exec } = require('child_process'); // Import exec for running ffmpeg and whisper
 const util = require('util'); // Import util for promisify
 const execPromise = util.promisify(exec); // Promisify exec
 
@@ -21,12 +21,12 @@ if (!token) {
   process.exit(1);
 }
 
-// Whisper API URL from environment variables
-const whisperApiUrl = process.env.WHISPER_API_URL;
-if (!whisperApiUrl) {
-  console.error('WHISPER_API_URL is not set in .env file');
-  process.exit(1);
-}
+// Whisper API URL from environment variables - No longer needed for local whisper CLI
+// const whisperApiUrl = process.env.WHISPER_API_URL;
+// if (!whisperApiUrl) {
+//   console.error('WHISPER_API_URL is not set in .env file');
+//   process.exit(1);
+// }
 
 // Get authorized users from environment variables
 const authorizedUsersStr = process.env.AUTHORIZED_USERS || '';
@@ -42,29 +42,29 @@ const bot = new Telegraf(token);
 // Authorization middleware
 bot.use((ctx, next) => {
   const userId = ctx.from?.id?.toString();
-  
+
   // If no authorized users specified or user is authorized
   if (authorizedUsers.length === 0 || (userId && authorizedUsers.includes(userId))) {
     return next();
   }
-  
+
   console.log(`Unauthorized access attempt by user ID: ${userId}`);
   return ctx.reply('Sorry, you are not authorized to use this bot.');
 });
 
 // Handle start command
 bot.start((ctx) => {
-  ctx.reply('Welcome! Send me a voice note, and I will transcribe it for you.');
+  ctx.reply('Welcome! Send me a voice note, audio, or video file, and I will transcribe it for you.');
 });
 
 // Handle help command
 bot.help((ctx) => {
-  ctx.reply('Send me a voice note, and I will transcribe it for you!');
+  ctx.reply('Send me a voice note, audio, or video file, and I will transcribe it for you!');
 });
 
 // Handle text messages
 bot.on('text', (ctx) => {
-  ctx.reply('Send me a voice note, and I will transcribe it for you!');
+  ctx.reply('Send me a voice note, audio, or video file, and I will transcribe it for you!');
 });
 // ================== Helper Functions ==================
 
@@ -79,7 +79,7 @@ async function downloadTelegramFile(ctx, fileId, fileType, statusMessage) {
     ctx.chat.id,
     statusMessage.message_id,
     undefined,
-    `Downloading ${fileType.replace('_', ' ')}...`
+    `Downloading ${fileType.replace(/_/g, ' ')}...` // Replace underscores for display
   );
   console.log(`[${messageId}] [${fileType}] Updated status to Downloading`);
 
@@ -89,15 +89,29 @@ async function downloadTelegramFile(ctx, fileId, fileType, statusMessage) {
     responseType: 'stream'
   });
 
-  // Determine file extension
+  // Determine file extension more robustly
   let fileExtension = '.dat'; // Default extension
-  if (ctx.message.voice) fileExtension = '.oga';
-  else if (ctx.message.video) fileExtension = `.${ctx.message.video.mime_type?.split('/')[1] || 'mp4'}`;
-  else if (ctx.message.video_note) fileExtension = '.mp4';
-  else if (ctx.message.document) fileExtension = `.${ctx.message.document.mime_type?.split('/')[1] || 'dat'}`;
+  let originalFileName = `${Date.now()}_${messageId}`; // Base name
 
+  if (ctx.message.voice) {
+      fileExtension = '.oga';
+  } else if (ctx.message.video) {
+      fileExtension = `.${ctx.message.video.mime_type?.split('/')[1] || 'mp4'}`;
+      originalFileName = ctx.message.video.file_name || originalFileName;
+  } else if (ctx.message.video_note) {
+      fileExtension = '.mp4';
+  } else if (ctx.message.audio) {
+      fileExtension = `.${ctx.message.audio.mime_type?.split('/')[1] || 'mp3'}`;
+      originalFileName = ctx.message.audio.file_name || originalFileName;
+  } else if (ctx.message.document) {
+      fileExtension = path.extname(ctx.message.document.file_name || '.dat'); // Use original extension if available
+      originalFileName = ctx.message.document.file_name || originalFileName;
+  }
 
-  const tempFilePath = path.join(tempDir, `${Date.now()}_${messageId}${fileExtension}`);
+  // Sanitize filename and ensure extension is present
+  const safeBaseName = path.basename(originalFileName, path.extname(originalFileName)).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const tempFilePath = path.join(tempDir, `${safeBaseName}${fileExtension}`);
+
   const writer = fs.createWriteStream(tempFilePath);
   console.log(`[${messageId}] [${fileType}] Starting download to ${tempFilePath}`);
 
@@ -130,8 +144,12 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
   );
   console.log(`[${messageId}] [${fileType}] Updated status to Extracting Audio`);
 
-  tempAudioPath = path.join(tempDir, `${Date.now()}_${messageId}.mp3`); // Output as mp3
-  const ffmpegCommand = `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -q:a 2 "${tempAudioPath}"`;
+  // Use input filename base for output, ensuring uniqueness
+  const inputBaseName = path.basename(inputPath, path.extname(inputPath));
+  tempAudioPath = path.join(tempDir, `${inputBaseName}_extracted.mp3`); // Output as mp3
+
+  // Use high quality MP3 encoding settings suitable for Whisper
+  const ffmpegCommand = `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -ab 192k -ar 16000 -ac 1 "${tempAudioPath}"`;
   console.log(`[${messageId}] [${fileType}] Running ffmpeg command: ${ffmpegCommand}`);
 
   try {
@@ -139,7 +157,10 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
     if (stderr) {
       console.log(`[${messageId}] [${fileType}] ffmpeg stderr: ${stderr}`);
     }
-    console.log(`[${messageId}] [${fileType}] ffmpeg stdout: ${stdout}`);
+    // ffmpeg might output useful info to stdout too
+    if (stdout) {
+        console.log(`[${messageId}] [${fileType}] ffmpeg stdout: ${stdout}`);
+    }
     console.log(`[${messageId}] [${fileType}] Successfully extracted audio to ${tempAudioPath}`);
     return tempAudioPath;
   } catch (ffmpegError) {
@@ -153,44 +174,99 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
   }
 }
 
-// Function to transcribe an audio file using Whisper API
+// Function to transcribe an audio file using Whisper CLI
 async function transcribeAudio(ctx, audioPath, fileType, statusMessage) {
   const messageId = ctx.message?.message_id || `unknown_${fileType}`;
-
-  // Lazy load Whisper model only when needed
-  const { Whisper } = await import('whisper-node');
-  const model = await Whisper.init({
-    modelName: 'medium',
-    device: 'cpu',
-    verbose: false
-  });
-  console.log(`[${messageId}] [${fileType}] Whisper model initialized`);
+  // Use a base name derived from the audio file for output files
+  const audioBaseName = path.basename(audioPath, path.extname(audioPath));
+  const outputBase = path.join(tempDir, `${audioBaseName}_transcription`);
+  const outputTxtPath = `${outputBase}.txt`; // Whisper appends .txt by default
 
   try {
     await ctx.telegram.editMessageText(
       ctx.chat.id,
       statusMessage.message_id,
       undefined,
-      `Transcribing ${fileType.includes('audio') ? 'audio' : 'extracted audio'}...`
+      `Transcribing ${fileType.includes('audio') ? 'audio' : 'extracted audio'}... (using openai-whisper)`
     );
-    console.log(`[${messageId}] [${fileType}] Updated status to Transcribing`);
+    console.log(`[${messageId}] [${fileType}] Updated status to Transcribing (openai-whisper)`);
 
-    console.log(`[${messageId}] [${fileType}] Starting transcription for ${audioPath}`);
-    const transcriptionResult = await model.transcribe(audioPath);
-    console.log(`[${messageId}] [${fileType}] Transcription finished`);
-    return transcriptionResult.text;
-  } finally {
-    // Force cleanup after transcription
-    if (model) {
-        try {
-            await model.cleanup();
-            console.log(`[${messageId}] [${fileType}] Whisper model memory released`);
-        } catch (cleanupError) {
-            console.error(`[${messageId}] [${fileType}] Error during Whisper model cleanup: ${cleanupError.message}`);
-        }
+    // Construct the whisper command
+    // Using 'medium' model as per previous config/user request
+    // Using 'en' language as suggested by the user (can be parameterized)
+    // Outputting only TXT format to the tempDir
+    // Using --fp16 False as suggested by the user (suitable for CPU)
+    // Specify the output filename base to avoid conflicts if multiple transcriptions run concurrently
+    const whisperCommand = `whisper "${audioPath}" --model medium --language en --output_dir "${tempDir}" --output_format txt --fp16 False --output_file "${outputBase}"`;
+
+    console.log(`[${messageId}] [${fileType}] Running whisper command: ${whisperCommand}`);
+
+    // Execute the command
+    // Increase maxBuffer size if needed for potentially long stderr output from whisper
+    const { stdout, stderr } = await execPromise(whisperCommand, { maxBuffer: 1024 * 1024 * 5 }); // 5MB buffer
+
+    // Whisper often outputs progress and details to stderr
+    if (stderr) {
+      console.log(`[${messageId}] [${fileType}] whisper stderr:\n${stderr}`);
+    }
+    // stdout might be empty or contain final confirmation
+    if (stdout) {
+        console.log(`[${messageId}] [${fileType}] whisper stdout:\n${stdout}`);
     }
 
-    // Explicitly force garbage collection (Node.js >= 14)
+    console.log(`[${messageId}] [${fileType}] Transcription command finished`);
+
+    // Check if the output file exists
+    if (!fs.existsSync(outputTxtPath)) {
+        console.error(`[${messageId}] [${fileType}] Transcription output file not found: ${outputTxtPath}`);
+        // Log stderr again specifically in case of file not found error
+        console.error(`[${messageId}] [${fileType}] stderr that might contain error: ${stderr}`);
+        throw new Error('Transcription failed: Output file not generated.');
+    }
+
+    // Read the transcription from the file
+    const transcription = fs.readFileSync(outputTxtPath, 'utf8').trim();
+    console.log(`[${messageId}] [${fileType}] Transcription read successfully from ${outputTxtPath}`);
+
+    // Basic check for empty transcription
+    if (!transcription) {
+        console.warn(`[${messageId}] [${fileType}] Transcription result is empty.`);
+        // Optionally inform the user or return a specific message
+        // return "[Transcription result was empty]";
+    }
+
+    return transcription;
+
+  } catch (error) {
+      console.error(`[${messageId}] [${fileType}] Error during whisper CLI execution: ${error.message}`);
+      if (error.stderr) {
+          console.error(`[${messageId}] [${fileType}] whisper stderr: ${error.stderr}`);
+      }
+      if (error.stdout) {
+          console.error(`[${messageId}] [${fileType}] whisper stdout: ${error.stdout}`);
+      }
+      // Rethrow a more specific error if possible
+      if (error.message.includes('FileNotFoundError')) {
+           throw new Error(`Transcription failed: Could not find input file for whisper. ${error.message}`);
+      }
+      if (error.message.includes('torch.cuda.OutOfMemoryError')) {
+          throw new Error(`Transcription failed: Out of memory. Try a smaller model or shorter audio. ${error.message}`);
+      }
+      throw error; // Re-throw the original or modified error
+  } finally {
+    // Clean up the generated transcription file(s)
+    // Whisper might create other files if format changes or based on exact version
+    const possibleExtensions = ['.txt', '.vtt', '.srt', '.tsv', '.json'];
+    possibleExtensions.forEach(ext => {
+        const filePath = `${outputBase}${ext}`;
+        if (fs.existsSync(filePath)) {
+            console.log(`[${messageId}] [${fileType}] Cleaning up whisper output file: ${filePath}`);
+            try { fs.unlinkSync(filePath); } catch (e) { console.error(`[${messageId}] Error deleting whisper output file ${filePath}: ${e.message}`); }
+        }
+    });
+
+    // No model cleanup needed for CLI approach
+    // Garbage collection can still be useful for Node.js process itself
     if (global.gc) {
       global.gc();
       console.log(`[${messageId}] [${fileType}] Forced garbage collection`);
@@ -204,10 +280,10 @@ async function processMediaFile(ctx, fileId, fileType, needsAudioExtraction) {
   let tempFilePath = null; // Path for downloaded file
   let tempAudioPath = null; // Path for extracted audio (if needed)
   const messageId = ctx.message?.message_id || `unknown_${fileType}`;
-  console.log(`[${messageId}] [${fileType}] Received ${fileType.replace('_', ' ')} from user ${ctx.from.id}`);
+  console.log(`[${messageId}] [${fileType}] Received ${fileType.replace(/_/g, ' ')} from user ${ctx.from.id}`);
 
   try {
-    statusMessage = await ctx.reply(`Receiving your ${fileType.replace('_', ' ')}...`);
+    statusMessage = await ctx.reply(`Receiving your ${fileType.replace(/_/g, ' ')}...`);
     console.log(`[${messageId}] [${fileType}] Sent initial status message ${statusMessage.message_id}`);
 
     // 1. Download file
@@ -218,6 +294,11 @@ async function processMediaFile(ctx, fileId, fileType, needsAudioExtraction) {
     if (needsAudioExtraction) {
       tempAudioPath = await extractAudio(ctx, tempFilePath, fileType, statusMessage);
       audioPathForTranscription = tempAudioPath; // Use extracted audio for transcription
+    } else {
+      // Optional: Convert non-mp3 audio to mp3 for consistency?
+      // Whisper CLI handles many formats, but converting might improve robustness or allow specific ffmpeg preprocessing.
+      // For now, we assume Whisper CLI handles the downloaded format directly if no extraction is needed.
+      console.log(`[${messageId}] [${fileType}] Using original downloaded file for transcription: ${audioPathForTranscription}`);
     }
 
     // 3. Transcribe Audio
@@ -225,20 +306,40 @@ async function processMediaFile(ctx, fileId, fileType, needsAudioExtraction) {
 
     // 4. Send Result
     console.log(`[${messageId}] [${fileType}] Sending transcription to user`);
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMessage.message_id,
-      undefined,
-      `Transcription complete! Here's the content:\n\n${transcription}`
-    );
+    // Check if transcription is too long for a single message
+    const MAX_MSG_LENGTH = 4096;
+    const resultText = `Transcription:\n\n${transcription || "[No speech detected or transcription empty]"}`;
+
+    if (resultText.length <= MAX_MSG_LENGTH) {
+        await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMessage.message_id,
+            undefined,
+            resultText
+        );
+    } else {
+        // Send initial part in edited message
+        await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMessage.message_id,
+            undefined,
+            resultText.substring(0, MAX_MSG_LENGTH)
+        );
+        // Send remaining parts in new messages
+        for (let i = MAX_MSG_LENGTH; i < resultText.length; i += MAX_MSG_LENGTH) {
+            await ctx.reply(resultText.substring(i, i + MAX_MSG_LENGTH));
+        }
+         console.log(`[${messageId}] [${fileType}] Sent long transcription in multiple parts.`);
+    }
+
     console.log(`[${messageId}] [${fileType}] Successfully sent transcription.`);
 
   } catch (error) {
     console.error(`[${messageId}] [${fileType}] Error processing ${fileType}:`, error.message);
-    if (error.response) {
+    if (error.response) { // Axios error details
       console.error(`[${messageId}] [${fileType}] API Response data:`, error.response.data);
       console.error(`[${messageId}] [${fileType}] API Status code:`, error.response.status);
-    } else if (error.stderr) { // Check for ffmpeg specific stderr
+    } else if (error.stderr) { // Check for stderr from execPromise errors (ffmpeg, whisper)
        console.error(`[${messageId}] [${fileType}] Process stderr:`, error.stderr);
     } else {
       console.error(`[${messageId}] [${fileType}] Full error object:`, error);
@@ -246,31 +347,40 @@ async function processMediaFile(ctx, fileId, fileType, needsAudioExtraction) {
 
     // Notify user about the error
     try {
+      const userErrorMessage = `Sorry, there was an error processing your ${fileType.replace(/_/g, ' ')}. Details: ${error.message.substring(0, 100)}`; // Provide a snippet of the error
       if (statusMessage) {
         await ctx.telegram.editMessageText(
           ctx.chat.id,
           statusMessage.message_id,
           undefined,
-          `Sorry, there was an error processing your ${fileType.replace('_', ' ')}. Please try again later.`
+          userErrorMessage
         );
          console.log(`[${messageId}] [${fileType}] Edited status message to show error.`);
       } else {
-        await ctx.reply(`Sorry, there was an error processing your ${fileType.replace('_', ' ')}. Please try again later.`);
+        await ctx.reply(userErrorMessage);
         console.log(`[${messageId}] [${fileType}] Sent new reply to show error.`);
       }
     } catch (replyError) {
       console.error(`[${messageId}] [${fileType}] Failed to notify user about the error: ${replyError.message}`);
     }
   } finally {
-    // 5. Cleanup ALL temporary files
-    if (tempAudioPath && fs.existsSync(tempAudioPath)) {
-        console.log(`[${messageId}] [${fileType}] Cleaning up temp audio file: ${tempAudioPath}`);
-        try { fs.unlinkSync(tempAudioPath); } catch (e) { console.error(`[${messageId}] Error deleting temp audio file: ${e.message}`); }
+    // 5. Cleanup ALL temporary files involved in this request
+    const filesToDelete = [tempAudioPath, tempFilePath]; // Add paths that might exist
+    // Also add potential whisper output files (though transcribeAudio should handle its own)
+    const audioBaseName = tempAudioPath ? path.basename(tempAudioPath, path.extname(tempAudioPath)) : (tempFilePath ? path.basename(tempFilePath, path.extname(tempFilePath)) : null);
+    if (audioBaseName) {
+        const outputBase = path.join(tempDir, `${audioBaseName}_transcription`);
+        const possibleExtensions = ['.txt', '.vtt', '.srt', '.tsv', '.json'];
+         possibleExtensions.forEach(ext => filesToDelete.push(`${outputBase}${ext}`));
     }
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-        console.log(`[${messageId}] [${fileType}] Cleaning up temp media file: ${tempFilePath}`);
-        try { fs.unlinkSync(tempFilePath); } catch (e) { console.error(`[${messageId}] Error deleting temp media file: ${e.message}`); }
-    }
+
+
+    filesToDelete.forEach(filePath => {
+        if (filePath && fs.existsSync(filePath)) {
+            console.log(`[${messageId}] [${fileType}] Cleaning up temp file: ${filePath}`);
+            try { fs.unlinkSync(filePath); } catch (e) { console.error(`[${messageId}] Error deleting temp file ${filePath}: ${e.message}`); }
+        }
+    });
   }
 }
 
@@ -279,7 +389,7 @@ async function processMediaFile(ctx, fileId, fileType, needsAudioExtraction) {
 // Handle voice messages
 bot.on('voice', async (ctx) => {
   const fileId = ctx.message.voice.file_id;
-  await processMediaFile(ctx, fileId, 'voice', false); // No audio extraction needed for voice
+  await processMediaFile(ctx, fileId, 'voice', false); // Whisper CLI handles .oga directly
 });
 
 // Handle video messages
@@ -294,13 +404,13 @@ bot.on('video_note', async (ctx) => {
   await processMediaFile(ctx, fileId, 'video_note', true); // Needs audio extraction
 });
 
-// Handle audio messages (sent as audio file, possibly forwarded)
+// Handle audio messages (sent as audio file)
 bot.on('audio', async (ctx) => {
   console.log('>>> Audio handler entered <<<');
   const audio = ctx.message.audio;
   const fileId = audio.file_id;
   // Use 'audio' as fileType for logging/status messages
-  await processMediaFile(ctx, fileId, 'audio', false); // No extraction needed
+  await processMediaFile(ctx, fileId, 'audio', false); // Whisper CLI handles common audio formats
 });
 
 // Handle document messages (generic attachments)
@@ -314,40 +424,54 @@ bot.on('document', async (ctx) => {
   console.log(`[${messageId}] [document] Received document: ${doc.file_name}, MIME type: '${mimeType}', Size: ${doc.file_size}`);
 
   // Define supported MIME types for transcription (expanded list)
+  // These are types Whisper CLI generally supports via ffmpeg backend
   const supportedAudioTypes = [
-    'audio/ogg',
-    'audio/mpeg', // Common for MP3
-    'audio/mp3',
-    'audio/wav',
-    'audio/x-wav', // Variations for WAV
-    'audio/wave',
-    'audio/x-pn-wav',
-    'audio/aac',
-    'audio/flac',
-    'audio/opus',
-    'audio/m4a'
+    'audio/ogg', 'audio/vorbis', // oga, ogg
+    'audio/mpeg', 'audio/mp3', // mp3
+    'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/x-pn-wav', // wav
+    'audio/aac', // aac
+    'audio/flac', 'audio/x-flac', // flac
+    'audio/opus', // opus
+    'audio/mp4', // m4a (often audio/mp4)
+    'audio/x-m4a', // m4a
+    'audio/amr', // amr
+    'audio/webm', // webm audio
   ];
-  const supportedVideoTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/x-matroska']; // AVI, MKV
+  const supportedVideoTypes = [
+      'video/mp4',
+      'video/mpeg',
+      'video/quicktime', // mov
+      'video/webm',
+      'video/x-msvideo', // avi
+      'video/x-matroska', // mkv
+      'video/x-flv', // flv
+      'video/3gpp', // 3gp
+      'video/x-ms-wmv', // wmv
+    ];
 
   if (supportedAudioTypes.includes(mimeType)) {
     console.log(`[${messageId}] [document] Processing as audio document.`);
     // Use 'audio_document' as fileType for logging/status messages
-    await processMediaFile(ctx, fileId, 'audio_document', false);
+    await processMediaFile(ctx, fileId, 'audio_document', false); // Let Whisper handle format
   } else if (supportedVideoTypes.includes(mimeType)) {
     console.log(`[${messageId}] [document] Processing as video document.`);
     // Use 'video_document' as fileType for logging/status messages
-    await processMediaFile(ctx, fileId, 'video_document', true);
+    await processMediaFile(ctx, fileId, 'video_document', true); // Extract audio first
   } else {
-    console.log(`[${messageId}] [document] Unsupported file type: ${mimeType}`);
-    await ctx.reply(`Sorry, I can only transcribe audio and video files. The received file type (${mimeType}) is not supported.`);
+    console.log(`[${messageId}] [document] Unsupported file type: ${mimeType} for file ${doc.file_name}`);
+    await ctx.reply(`Sorry, I can only transcribe common audio and video file types. The received file type (${mimeType}) might not be supported directly.`);
   }
 });
 
 // Launch the bot
-bot.launch();
+bot.launch().then(() => {
+    console.log('Bot launched successfully!');
+}).catch(err => {
+    console.error('Failed to launch bot:', err);
+});
 
 // Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => { console.log('SIGINT received...'); bot.stop('SIGINT'); });
+process.once('SIGTERM', () => { console.log('SIGTERM received...'); bot.stop('SIGTERM'); });
 
-console.log('Bot is running. Send a voice message to get started!'); 
+console.log('Bot is starting...');
