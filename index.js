@@ -21,13 +21,6 @@ if (!token) {
   process.exit(1);
 }
 
-// Whisper API URL from environment variables - No longer needed for local whisper CLI
-// const whisperApiUrl = process.env.WHISPER_API_URL;
-// if (!whisperApiUrl) {
-//   console.error('WHISPER_API_URL is not set in .env file');
-//   process.exit(1);
-// }
-
 // Get authorized users from environment variables
 const authorizedUsersStr = process.env.AUTHORIZED_USERS || '';
 const authorizedUsers = authorizedUsersStr.split(',').map(id => id.trim()).filter(Boolean);
@@ -162,7 +155,7 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
   // For OPUS files, we'll do a more precise conversion
   const ffmpegCommand = isOpus 
     ? `ffmpeg -i "${inputPath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "${tempAudioPath}"` // Convert OPUS to WAV
-    : `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -ab 192k -ar 16000 -ac 1 "${tempAudioPath}"`; // Existing MP3 conversion
+    : `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -ab 192k -ar 16000 -ac 1 "${tempAudioPath}`; // Existing MP3 conversion
   
   console.log(`[${messageId}] [${fileType}] Running ffmpeg command: ${ffmpegCommand}`);
 
@@ -454,8 +447,9 @@ bot.on('document', async (ctx) => {
   const fileId = doc.file_id;
   const mimeType = doc.mime_type || 'application/octet-stream';
   const messageId = ctx.message?.message_id || 'unknown_document';
-
-  console.log(`[${messageId}] [document] Received document: ${doc.file_name}, MIME type: '${mimeType}', Size: ${doc.file_size}`);
+  const fileName = doc.file_name || '';
+  
+  console.log(`[${messageId}] [document] Received document: ${fileName}, MIME type: '${mimeType}', Size: ${doc.file_size}`);
 
   // Define supported MIME types for transcription (expanded list)
   // These are types Whisper CLI generally supports via ffmpeg backend
@@ -482,7 +476,12 @@ bot.on('document', async (ctx) => {
       'video/x-ms-wmv', // wmv
     ];
 
-  if (supportedAudioTypes.includes(mimeType)) {
+  // Check if the file has a .opus extension or is identified as opus
+  const isOpusFile = fileName.toLowerCase().endsWith('.opus') || 
+                     mimeType === 'audio/opus' ||
+                     (mimeType === 'application/octet-stream' && fileName.toLowerCase().endsWith('.opus'));
+
+  if (supportedAudioTypes.includes(mimeType) || isOpusFile) {
     console.log(`[${messageId}] [document] Processing as audio document.`);
     // Use 'audio_document' as fileType for logging/status messages
     await processMediaFile(ctx, fileId, 'audio_document', false); // Let Whisper handle format
@@ -491,7 +490,7 @@ bot.on('document', async (ctx) => {
     // Use 'video_document' as fileType for logging/status messages
     await processMediaFile(ctx, fileId, 'video_document', true); // Extract audio first
   } else {
-    console.log(`[${messageId}] [document] Unsupported file type: ${mimeType} for file ${doc.file_name}`);
+    console.log(`[${messageId}] [document] Unsupported file type: ${mimeType} for file ${fileName}`);
     await ctx.reply(`Sorry, I can only transcribe common audio and video file types. The received file type (${mimeType}) might not be supported directly.`);
   }
 });
