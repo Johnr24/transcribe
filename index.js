@@ -149,10 +149,21 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
 
   // Use input filename base for output, ensuring uniqueness
   const inputBaseName = path.basename(inputPath, path.extname(inputPath));
-  tempAudioPath = path.join(tempDir, `${inputBaseName}_extracted.mp3`); // Output as mp3
+  
+  // Check if the input is an OPUS file
+  const isOpus = path.extname(inputPath).toLowerCase() === '.opus';
+  
+  // For OPUS files, we need to transcode to a format Whisper can handle
+  // For other files, proceed with standard extraction
+  const outputFormat = isOpus ? 'wav' : 'mp3'; // Convert OPUS to WAV for better compatibility
+  tempAudioPath = path.join(tempDir, `${inputBaseName}_converted.${outputFormat}`); // Output with new format
 
-  // Use high quality MP3 encoding settings suitable for Whisper
-  const ffmpegCommand = `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -ab 192k -ar 16000 -ac 1 "${tempAudioPath}"`;
+  // Use high quality encoding settings suitable for Whisper
+  // For OPUS files, we'll do a more precise conversion
+  const ffmpegCommand = isOpus 
+    ? `ffmpeg -i "${inputPath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "${tempAudioPath}"` // Convert OPUS to WAV
+    : `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -ab 192k -ar 16000 -ac 1 "${tempAudioPath}"`; // Existing MP3 conversion
+  
   console.log(`[${messageId}] [${fileType}] Running ffmpeg command: ${ffmpegCommand}`);
 
   try {
@@ -164,7 +175,7 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
     if (stdout) {
         console.log(`[${messageId}] [${fileType}] ffmpeg stdout: ${stdout}`);
     }
-    console.log(`[${messageId}] [${fileType}] Successfully extracted audio to ${tempAudioPath}`);
+    console.log(`[${messageId}] [${fileType}] Successfully processed audio to ${tempAudioPath}`);
     return tempAudioPath;
   } catch (ffmpegError) {
     console.error(`[${messageId}] [${fileType}] ffmpeg execution failed: ${ffmpegError.message}`);
@@ -173,7 +184,7 @@ async function extractAudio(ctx, inputPath, fileType, statusMessage) {
      if (tempAudioPath && fs.existsSync(tempAudioPath)) {
         try { fs.unlinkSync(tempAudioPath); } catch (e) { console.error(`[${messageId}] Error deleting failed temp audio file: ${e.message}`); }
     }
-    throw new Error(`Failed to extract audio: ${ffmpegError.message}`);
+    throw new Error(`Failed to process audio: ${ffmpegError.message}`);
   }
 }
 
@@ -455,8 +466,7 @@ bot.on('document', async (ctx) => {
     'audio/aac', // aac
     'audio/flac', 'audio/x-flac', // flac
     'audio/opus', // opus
-    'audio/mp4', // m4a (often audio/mp4)
-    'audio/x-m4a', // m4a
+    'audio/mp4', 'audio/x-m4a', // m4a
     'audio/amr', // amr
     'audio/webm', // webm audio
   ];
